@@ -1,6 +1,6 @@
 pandas
 apscheduler
-aiogram>=3.0.0
+aiogram
 pyTelegramBotAPI
 requests
 ccxt
