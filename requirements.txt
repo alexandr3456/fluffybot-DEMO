@@ -1,0 +1,8 @@
+pandas
+apscheduler
+aiogram>=3.0.0
+pyTelegramBotAPI
+requests
+ccxt
+pandas_ta_classic
+python-dotenv
