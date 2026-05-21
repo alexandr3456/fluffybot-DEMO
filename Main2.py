@@ -70,9 +70,9 @@ async def get_symbols():
         return []
 
 
-async def fetch_ohlcv(symbol, timeframe, limit=100):
+def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
