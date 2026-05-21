@@ -1,4 +1,5 @@
 pandas
+pandas-ta
 apscheduler
 aiogram
 pyTelegramBotAPI
