@@ -19,13 +19,14 @@ load_dotenv()
 
 # ========================= НАСТРОЙКИ =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 300))
 
 # Проверка обязательных переменных
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN missing")
-
+if not TELEGRAM_CHAT_ID:
+    raise ValueError("❌ TELEGRAM_CHAT_ID missing")
 
 # Параметры качества сигналов
 MIN_24H_VOLUME_USD = 800_000
@@ -36,10 +37,12 @@ RSI_THRESHOLD = 73
 RSI_THRESHOLD_15M = 70
 MIN_FUNDING_RATE = 0.0001
 
-# Инициализация биржи с асинхронной поддержкой
+# Инициализация биржи с настройками таймаутов
 exchange = ccxt.bybit({
     'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
+    'options': {'defaultType': 'swap'},
+    'timeout': 30000,  # 30 секунд таймаут
+    'rateLimit': 2000,   # 2 секунды между запросами
 })
 
 # Новый способ задания parse_mode в aiogram 3.7+
@@ -59,7 +62,7 @@ def rsi(series, period=14):
 
 async def get_symbols():
     try:
-        markets = exchange.load_markets()  # Убрали await
+        markets = exchange.load_markets()  # Синхронный вызов
         symbols = [
             s for s, m in markets.items()
             if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap'
@@ -68,7 +71,6 @@ async def get_symbols():
     except Exception as e:
         logger.error(f"Error loading markets: {e}")
         return []
-
 
 def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
@@ -93,8 +95,9 @@ async def check_symbol(symbol):
         # Добавляем задержку между запросами
         await asyncio.sleep(0.1)
 
-        df5 = await fetch_ohlcv(symbol, '5m', 80)
-        df15 = await fetch_ohlcv(symbol, '15m', 60)
+        # Убрали await — fetch_ohlcv синхронная функция
+        df5 = fetch_ohlcv(symbol, '5m', 80)
+        df15 = fetch_ohlcv(symbol, '15m', 60)
 
         if df5 is None or df15 is None or len(df5) < 40:
             return None
@@ -111,12 +114,14 @@ async def check_symbol(symbol):
         current_vol = df5['volume'].iloc[-1]
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        # RSI
-        rsi5 = rsi(df5['close']).iloc[-1]
-        rsi15 = rsi(df15['close']).iloc[-1]
+        # RSI — синхронные вызовы, без await
+        rsi5_series = rsi(df5['close'], period=14)
+        rsi15_series = rsi(df15['close'], period=14)
+        rsi5 = rsi5_series.iloc[-1] if not rsi5_series.empty else 0
+        rsi15 = rsi15_series.iloc[-1] if not rsi15_series.empty else 0
 
-        # 24h volume
-        ticker = await exchange.fetch_ticker(symbol)  # Асинхронный вызов
+        # 24h volume — асинхронный вызов
+        ticker = await exchange.fetch_ticker(symbol)
         volume_24h = ticker.get('quoteVolume', 0)
 
         funding = await get_funding_rate(symbol)
@@ -145,14 +150,36 @@ async def check_symbol(symbol):
     return None
 
 async def scanner():
-    print("🚀 Bybit Short Pump Scanner запущен...")
+     print("🚀 Bybit Short Pump Scanner запущен...")
     while True:
         try:
             symbols = await get_symbols()
-            tasks = [check_symbol(sym) for sym in symbols]
-            results = await asyncio.gather(*tasks)
+            logger.info(f"Найдено {len(symbols)} символов для сканирования")
 
-            for signal in [r for r in results if r]:
+            # Обрабатываем символы батчами по 20 штук для снижения нагрузки на API
+            batch_size = 20
+            all_signals = []
+
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
+                logger.info(f"Обрабатывается батч {i//batch_size + 1} из {(len(symbols) + batch_size - 1) // batch_size}")
+
+                tasks = [check_symbol(sym) for sym in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Фильтруем только успешные результаты (не исключения)
+                valid_results = [
+                    result for result in results
+            if isinstance(result, dict) and result is not None
+                ]
+                all_signals.extend(valid_results)
+
+                # Пауза между батчами для соблюдения лимитов API
+                await asyncio.sleep(2)
+
+            # Отправляем найденные сигналы в Telegram
+            sent_count = 0
+            for signal in all_signals:
                 text = f"""<b>🔴 ШОРТ СИГНАЛ — СИЛЬНЫЙ ПАМП</b>
 
 🔹 <b>{signal['symbol']}USDT</b>
@@ -167,7 +194,14 @@ async def scanner():
 
 🕒 {signal['time']} | Bybit Perpetual"""
 
-                
+                try:
+                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+                    sent_count += 1
+                    logger.info(f"✅ Сигнал отправлен для {signal['symbol']}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки в Telegram для {signal['symbol']}: {e}")
+
+            logger.info(f"📊 Найдено сигналов: {len(all_signals)}, отправлено: {sent_count}")
 
         except Exception as e:
             logger.error(f"Ошибка сканирования: {e}")
