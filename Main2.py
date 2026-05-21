@@ -1,7 +1,6 @@
 import asyncio
 import ccxt
 import pandas as pd
-import  pandas_ta
 from datetime import datetime
 from aiogram import Bot
 from dotenv import load_dotenv
