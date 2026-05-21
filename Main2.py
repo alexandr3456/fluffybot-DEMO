@@ -1,260 +1,140 @@
 import asyncio
-import os
-import json
-import logging
-from datetime import datetime, timedelta
-import pandas as pd
-import pandas_ta as ta
 import ccxt
-import aiohttp
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pandas as pd
+import ta
+from datetime import datetime
+from aiogram import Bot
 from dotenv import load_dotenv
+import os
 
-# ===================== CONFIG =====================
 load_dotenv()
+
+# ========================= НАСТРОЙКИ =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN missing")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 300))
 
-CHECK_INTERVAL = 5  # minutes — интервал сканирования рынка
-COOLDOWN_MINUTES = 30  # cooldown между сигналами для одного символа
-DATA_FILE = "data.json"
-BYBIT_DELAY = 0.5   # seconds — задержка между запросами
+# Параметры качества сигналов
+MIN_24H_VOLUME_USD = 800_000      # минимальный объём за 24ч
+PRICE_PUMP_5M = 7.0               # % роста за 5 минут
+PRICE_PUMP_15M = 12.0             # % роста за 15 минут
+VOLUME_SPIKE = 3.8                # во сколько раз объём выше среднего
+RSI_THRESHOLD = 73                # RSI на 5m
+RSI_THRESHOLD_15M = 70            # RSI на 15m
+MIN_FUNDING_RATE = 0.0001        # положительный funding (выгодно шортить)
 
-# ===================== LOGGING =====================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
+exchange = ccxt.bybit({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
 
-# ===================== BOT =====================
-bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
-subscribers = set()
-last_signals = {}
+bot = Bot(token=TELEGRAM_TOKEN, parse_mode="HTML")
 
-# ===================== STORAGE =====================
-def load_data():
-    global subscribers
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-                subcribers = set(data.get("subcribers", []))
-                logger.info(f"Loaded {len(subcribers)} subscribers")
-        except Exception as e:
-            logger.error(f"Failed to load data file: {e}")
+async def get_symbols():
+    markets = exchange.load_markets()
+    symbols = [s for s, m in markets.items() 
+               if m['active'] and m['quote'] == 'USDT' and m['type'] == 'swap']
+    return symbols[:350]
 
-def save_data():
+def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump({"subcribers": list(subcribers)}, f)
-    except Exception as e:
-        logger.error(f"Failed to save data file: {e}")
-
-# ===================== EXCHANGE =====================
-async def init_exchange():
-    connector = aiohttp.TCPConnector(limit=100, limit_per_host=30)
-    session = aiohttp.ClientSession(connector=connector)
-    exchange = ccxt.bybit({
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "future",
-            "http": {"aiohttp_session": session}
-        }
-    })
-    return exchange, session
-
-# ===================== HELPER FUNCTIONS =====================
-async def fetch_ohlcv_async(exchange, symbol):
-    try:
-        return await exchange.fetch_ohlcv(symbol, timeframe="5m", limit=100, params={"category": "linear"})
-    except Exception as e:
-        logger.error(f"fetch_ohlcv error for {symbol}: {e}")
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
+    except:
         return None
 
-async def fetch_funding(exchange, symbol):
+async def get_funding_rate(symbol):
     try:
-        info = await exchange.fetch_funding_rate(symbol)
-        return info.get('fundingRate', 0)
-    except Exception as e:
-        logger.error(f"fetch_funding error for {symbol}: {e}")
+        funding = exchange.fetch_funding_rate(symbol)
+        return funding.get('fundingRate', 0)
+    except:
         return 0
 
-async def fetch_oi(exchange, symbol):
+async def check_symbol(symbol):
     try:
-        ticker = await exchange.fetch_ticker(symbol)
-        return ticker.get('quoteVolume', 0)  # Используем volume как прокси для OI
-    except Exception as e:
-        logger.error(f"fetch_oi error for {symbol}: {e}")
-        return 0
+        df5 = fetch_ohlcv(symbol, '5m', 80)
+        df15 = fetch_ohlcv(symbol, '15m', 60)
+        df1h = fetch_ohlcv(symbol, '1h', 50)
 
-def calculate_indicators(df):
-    df["rsi"] = ta.rsi(df["close"], length=14)
-    df["ema50"] = ta.ema(df["close"], length=50)
-    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
-    return df
-
-def get_trend_filter(df):
-    ema200 = ta.ema(df["close"], length=200)
-    ema50 = ta.ema(df["close"], length=50)
-    if len(ema200) < 2 or len(ema50) < 2:
-        return True
-    return ema200.iloc[-1] < ema50.iloc[-1]  # Нисходящий тренд
-
-
-def normalize_data(series):
-    mean = series.mean()
-    std = series.std()
-    if std == 0:
-        return 0
-    return (series.iloc[-1] - mean) / std
-
-
-def get_signal(df, funding_rate, open_interest):
-    price = df["close"].iloc[-1]
-    ema = df["ema50"].iloc[-1]
-    rsi = df["rsi"].iloc[-1]
-    atr = df["atr"].iloc[-1] if "atr" in df.columns else 0.01
-
-    z_funding = normalize_data(df["funding"]) if "funding" in df else 0
-    z_oi = normalize_data(df["oi"]) if "oi" in df else 0
-
-    score = 0
-    reasons = []
-
-    if rsi > 75:
-        score += 3
-        reasons.append("RSI перекуплен (>75)")
-    volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-2] * 1.8
-    if volume_spike:
-        score += 2
-        reasons.append("Всплеск объёма (>1.8× среднего)")
-    ema_deviation = abs(price - ema) / ema
-    if ema_deviation > atr * 2:
-        score += 2
-        reasons.append(f"Сильное отклонение от EMA ({ema_deviation:.2%})")
-    if z_funding > 1:
-        score += 1
-        reasons.append("Высокая ставка финансирования (Z>1)")
-    if z_oi > 1:
-        score += 1
-        reasons.append("Рост открытого интереса (Z>1)")
-
-    dynamic_threshold = 8 if atr < 0.01 else 6
-    trend_ok = get_trend_filter(df)
-
-    stop_loss = price * 0.98
-    take_profit = price * 0.94
-
-    return score >= dynamic_threshold and trend_ok, score, reasons, {
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "atr": atr
-    }
-
-# ===================== CORE FUNCTIONS =====================
-async def process_symbol(exchange, symbol):
-    try:
-        await asyncio.sleep(BYBIT_DELAY)
-
-        now = datetime.now()
-        if symbol in last_signals and now - last_signals[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
-                        return None
-
-        ohlcv = await fetch_ohlcv_async(exchange, symbol)
-        if not ohlcv:
+        if df5 is None or df15 is None or len(df5) < 30:
             return None
 
-        df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-        df["close"] = pd.to_numeric(df["close"], errors='coerce')
-        df["volume"] = pd.to_numeric(df["volume"], errors='coerce')
-        df = calculate_indicators(df)
+        price = df5['close'].iloc[-1]
+        price_5m_ago = df5['close'].iloc[-2]
+        price_15m_ago = df15['close'].iloc[-2]
 
-        # Добавляем данные финансирования и OI в DataFrame для нормализации
-        funding_rate = await fetch_funding(exchange, symbol)
-        open_interest = await fetch_oi(exchange, symbol)
-        df["funding"] = [funding_rate] * len(df)
-        df["oi"] = [open_interest] * len(df)
+        change_5m = (price - price_5m_ago) / price_5m_ago * 100
+        change_15m = (price - price_15m_ago) / price_15m_ago * 100
 
-        signal_triggered, score, reasons, risk_management = get_signal(df, funding_rate, open_interest)
+        # Volume spike на 5m
+        avg_vol = df5['volume'].rolling(20).mean().iloc[-1]
+        current_vol = df5['volume'].iloc[-1]
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        if signal_triggered:
-            last_signals[symbol] = now
-            return symbol, score, reasons, risk_management
-    except Exception as e:
-        logger.error(f"process_symbol error for {symbol}: {e}")
+        # RSI
+        rsi5 = ta.momentum.RSIIndicator(df5['close'], window=14).rsi().iloc[-1]
+        rsi15 = ta.momentum.RSIIndicator(df15['close'], window=14).rsi().iloc[-1]
+
+        # 24h volume
+        ticker = exchange.fetch_ticker(symbol)
+        volume_24h = ticker.get('quoteVolume', 0)
+
+        funding = await get_funding_rate(symbol)
+
+        # === УСЛОВИЯ КАЧЕСТВЕННОГО СИГНАЛА ===
+        if (change_5m >= PRICE_PUMP_5M and 
+            change_15m >= PRICE_PUMP_15M and 
+            vol_ratio >= VOLUME_SPIKE and 
+            rsi5 >= RSI_THRESHOLD and 
+            rsi15 >= RSI_THRESHOLD_15M and 
+            volume_24h >= MIN_24H_VOLUME_USD and 
+            funding >= MIN_FUNDING_RATE):
+
+            return {
+                'symbol': symbol.replace('USDT', ''),
+                'price': price,
+                'pump_5m': round(change_5m, 2),
+                'pump_15m': round(change_15m, 2),
+                'vol_ratio': round(vol_ratio, 2),
+                'rsi5': round(rsi5, 1),
+                'funding': round(funding * 10000, 2),  # в базисных пунктах
+                'volume_24h': f"{volume_24h/1_000_000:.1f}M",
+                'time': datetime.now().strftime("%H:%M")
+            }
+    except:
+        pass
     return None
 
-
-async def scan_market(exchange):
-    logger.info("🔍 Scan start")
-    try:
-        markets = await exchange.load_markets()
-        symbols = [
-            s for s, i in markets.items()
-            if i.get("linear") and i.get("quote") == "USDT" and i.get("active", True)
-        ]
-
-        # Ограничиваем количество символов для сканирования
-        symbols_to_scan = symbols[:50]
-        tasks = [process_symbol(exchange, s) for s in symbols_to_scan]
+async def scanner():
+    print("🚀 Качественный Bybit Pump Scanner запущен...")
+    while True:
+        symbols = await get_symbols()
+        tasks = [check_symbol(sym) for sym in symbols]
         results = await asyncio.gather(*tasks)
 
-        signals = [r for r in results if r]
+        for signal in results:
+            if signal:
+                text = f"""<b>🔴 ШОРТ СИГНАЛ — СИЛЬНЫЙ ПАМП</b>
 
-        for symbol, score, reasons, rm in signals:
-            token = symbol.replace("USDT", "")
-            reasons_text = "\n".join([f"• {r}" for r in reasons])
-            text = f"""
-🚨 <b>SHORT SIGNAL</b> — ${token}
-🔥 Score: <b>{score}/10</b>
-📋 Причины:
-{reasons_text}
-🛡️ Управление рисками:
-• Stop Loss: {rm['stop_loss']:.4f}
-• Take Profit: {rm['take_profit']:.4f}
-• ATR: {rm['atr']:.4f}
-🕒 {datetime.now().strftime('%H:%M:%S')}
-🔗 https://www.bybit.com/trade/perpetual/{symbol}
-"""
-            for user in subscribers:
-                try:
-                    await bot.send_message(user, text, parse_mode="HTML", disable_web_page_preview=True)
-                except Exception as e:
-                    logger.warning(f"Failed to send message to {user}: {e}")
+🔹 <b>{signal['symbol']}USDT</b>
+💰 Цена: <b>${signal['price']:.4f}</b>
 
-        logger.info(f"✅ Signals sent: {len(signals)}")
-    except Exception as e:
-        logger.error(f"Scan error: {e}")
+📈 Рост 5м: <b>+{signal['pump_5m']}%</b>
+📈 Рост 15м: <b>+{signal['pump_15m']}%</b>
+📊 Volume spike: <b>x{signal['vol_ratio']}</b>
+📉 RSI 5m: <b>{signal['rsi5']}</b>
 
-# ===================== MAIN =====================
-async def main():
-    load_data()
-    logger.info("🚀 Bot started")
-    await bot.delete_webhook(drop_pending_updates=True)
+💸 Funding: <b>+{signal['funding']}%</b>
+📊 24h Vol: <b>${signal['volume_24h']}</b>
 
-    exchange, session = await init_exchange()
+🕒 {signal['time']} | Bybit Perpetual"""
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan_market, "interval", minutes=CHECK_INTERVAL, args=[exchange])
-    scheduler.start()
+                await bot.send_message(TELEGRAM_CHAT_ID, text)
+                print(f"✅ Сигнал отправлен: {signal['symbol']}")
 
-    # Запускаем первое сканирование с задержкой
-    async def delayed_scan():
-        await asyncio.sleep(2)
-        await scan_market(exchange)
-    asyncio.create_task(delayed_scan())
-
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await session.close()
+        await asyncio.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    asyncio.run(scanner())
