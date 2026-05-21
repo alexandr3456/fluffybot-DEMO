@@ -3,6 +3,7 @@ import ccxt
 import pandas as pd
 from datetime import datetime
 from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import os
 
@@ -27,11 +28,15 @@ exchange = ccxt.bybit({
     'options': {'defaultType': 'future'}
 })
 
-bot = Bot(token=TELEGRAM_TOKEN, parse_mode="HTML")
+# Новый способ задания parse_mode в aiogram 3.7+
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 
 
 def rsi(series, period=14):
-    """Простой расчёт RSI без дополнительных библиотек"""
+    """Простой расчёт RSI"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -94,7 +99,6 @@ async def check_symbol(symbol):
 
         funding = await get_funding_rate(symbol)
 
-        # === КАЧЕСТВЕННЫЙ СИГНАЛ ===
         if (change_5m >= PRICE_PUMP_5M and 
             change_15m >= PRICE_PUMP_15M and 
             vol_ratio >= VOLUME_SPIKE and 
@@ -120,7 +124,7 @@ async def check_symbol(symbol):
 
 
 async def scanner():
-    print("🚀 Качественный Bybit Short Pump Scanner запущен...")
+    print("🚀 Bybit Short Pump Scanner запущен...")
     while True:
         symbols = await get_symbols()
         tasks = [check_symbol(sym) for sym in symbols]
@@ -140,10 +144,10 @@ async def scanner():
 💸 Funding: <b>+{signal['funding']}</b>
 📊 24h Vol: <b>${signal['volume_24h']}</b>
 
-🕒 {signal['time']} | Bybit"""
+🕒 {signal['time']} | Bybit Perpetual"""
 
             await bot.send_message(TELEGRAM_CHAT_ID, text)
-            print(f"✅ Сигнал: {signal['symbol']}")
+            print(f"✅ Сигнал отправлен: {signal['symbol']}")
 
         await asyncio.sleep(SCAN_INTERVAL)
 
