@@ -59,13 +59,16 @@ def rsi(series, period=14):
 
 async def get_symbols():
     try:
-        markets = await exchange.load_markets()  # Асинхронный вызов
-        symbols = [s for s, m in markets.items()
-                   if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap']
+        markets = exchange.load_markets()  # Убрали await
+        symbols = [
+            s for s, m in markets.items()
+            if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap'
+        ]
         return symbols[:350]
     except Exception as e:
         logger.error(f"Error loading markets: {e}")
         return []
+
 
 async def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
