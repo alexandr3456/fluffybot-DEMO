@@ -79,16 +79,7 @@ async def handle_messages(message):
             "/start — запустить подписку на сигналы\n"
             "/stop — отключить подписку"
         )
-@dp.message()
-async def handle_start(message):
-    global TELEGRAM_CHAT_ID
-    if message.text.lower() == '/start':
-        TELEGRAM_CHAT_ID = message.chat.id
-        await message.answer(
-            "✅ <b>Bybit Short Pump Scanner успешно запущен!</b>\n\n"
-            "Теперь вы будете получать сигналы."
-        )
-        logger.info(f"✅ Чат ID сохранён: {TELEGRAM_CHAT_ID}")
+
 
 
 def calculate_rsi(series, period=14):
