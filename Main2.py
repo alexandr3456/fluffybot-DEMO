@@ -14,7 +14,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 300))
 
-# Параметры качества сигналов
+# Параметры сигналов
 MIN_24H_VOLUME_USD = 800_000
 PRICE_PUMP_5M = 7.0
 PRICE_PUMP_15M = 12.0
@@ -40,8 +40,7 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Semaphore для контроля количества одновременных запросов
-semaphore = asyncio.Semaphore(10)  # не более 10 запросов одновременно
+semaphore = asyncio.Semaphore(10)   # Ограничение параллельных запросов
 
 exchange = ccxt.bybit({
     'enableRateLimit': True,
@@ -55,23 +54,21 @@ TELEGRAM_CHAT_ID = None
 @dp.message()
 async def handle_start(message):
     global TELEGRAM_CHAT_ID
-    if message.text == '/start':
+    if message.text.lower() == '/start':
         TELEGRAM_CHAT_ID = message.chat.id
         await message.answer(
             "✅ <b>Bybit Short Pump Scanner запущен!</b>\n\n"
-            "Теперь вы будете получать сигналы о сильных пампах."
+            "Вы будете получать сигналы о сильных пампах."
         )
         logger.info(f"Запомнен чат ID: {TELEGRAM_CHAT_ID}")
 
 
 def calculate_rsi(series, period=14):
-    """Улучшенный расчёт RSI"""
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(window=period).mean()
     loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 
 async def get_symbols():
@@ -79,11 +76,9 @@ async def get_symbols():
         markets = await exchange.load_markets()
         symbols = [
             s for s, m in markets.items()
-            if m.get('active') 
-            and m.get('quote') == 'USDT' 
-            and m.get('type') == 'swap'
+            if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap'
         ]
-        return symbols[:400]  # можно увеличить
+        return symbols[:400]
     except Exception as e:
         logger.error(f"Ошибка загрузки рынков: {e}")
         return []
@@ -97,7 +92,7 @@ async def fetch_ohlcv(symbol, timeframe, limit=100):
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.warning(f"OHLCV error {symbol} ({timeframe}): {e}")
+            logger.warning(f"OHLCV error {symbol} {timeframe}: {e}")
             return None
 
 
@@ -114,15 +109,12 @@ async def check_symbol(symbol):
             change_5m = (price - df5['close'].iloc[-2]) / df5['close'].iloc[-2] * 100
             change_15m = (price - df15['close'].iloc[-2]) / df15['close'].iloc[-2] * 100
 
-            # Volume spike
             avg_vol = df5['volume'].rolling(20).mean().iloc[-1]
             vol_ratio = df5['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
 
-            # RSI
             rsi5 = calculate_rsi(df5['close']).iloc[-1]
             rsi15 = calculate_rsi(df15['close']).iloc[-1]
 
-            # Ticker + Funding
             ticker = await exchange.fetch_ticker(symbol)
             funding = await exchange.fetch_funding_rate(symbol)
 
@@ -148,7 +140,6 @@ async def check_symbol(symbol):
                     'volume_24h': f"{volume_24h / 1_000_000:.1f}M",
                     'time': datetime.now().strftime("%H:%M")
                 }
-
         except Exception as e:
             logger.debug(f"check_symbol error {symbol}: {e}")
         return None
@@ -168,7 +159,7 @@ async def scanner():
             symbols = await get_symbols()
             logger.info(f"Сканирую {len(symbols)} пар...")
 
-            tasks = [check_symbol(symbol) for symbol in symbols]
+            tasks = [check_symbol(sym) for sym in symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             signals = [r for r in results if isinstance(r, dict)]
@@ -189,12 +180,12 @@ async def scanner():
                     await bot.send_message(TELEGRAM_CHAT_ID, text)
                     logger.info(f"✅ Сигнал отправлен: {signal['symbol']}")
                 except Exception as e:
-                    logger.error(f"Ошибка отправки в TG: {e}")
+                    logger.error(f"Ошибка отправки в Telegram {signal['symbol']}: {e}")
 
             logger.info(f"Найдено сигналов: {len(signals)}")
 
         except Exception as e:
-            logger.error(f"Критическая ошибка в scanner: {e}")
+            logger.error(f"Ошибка в цикле сканирования: {e}")
 
         await asyncio.sleep(SCAN_INTERVAL)
 
@@ -203,7 +194,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(scanner())
     except KeyboardInterrupt:
-        logger.info("🛑 Бот остановлен")
+        logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
         logger.critical(f"Критическая ошибка: {e}")
     finally:
