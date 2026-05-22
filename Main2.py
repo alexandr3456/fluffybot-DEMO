@@ -14,7 +14,6 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 300))
 
-# Параметры сигналов
 MIN_24H_VOLUME_USD = 800_000
 PRICE_PUMP_5M = 7.0
 PRICE_PUMP_15M = 12.0
@@ -40,7 +39,7 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-semaphore = asyncio.Semaphore(10)   # Ограничение параллельных запросов
+semaphore = asyncio.Semaphore(10)
 
 exchange = ccxt.bybit({
     'enableRateLimit': True,
@@ -57,10 +56,10 @@ async def handle_start(message):
     if message.text.lower() == '/start':
         TELEGRAM_CHAT_ID = message.chat.id
         await message.answer(
-            "✅ <b>Bybit Short Pump Scanner запущен!</b>\n\n"
-            "Вы будете получать сигналы о сильных пампах."
+            "✅ <b>Bybit Short Pump Scanner успешно запущен!</b>\n\n"
+            "Теперь вы будете получать сигналы."
         )
-        logger.info(f"Запомнен чат ID: {TELEGRAM_CHAT_ID}")
+        logger.info(f"✅ Чат ID сохранён: {TELEGRAM_CHAT_ID}")
 
 
 def calculate_rsi(series, period=14):
@@ -74,13 +73,10 @@ def calculate_rsi(series, period=14):
 async def get_symbols():
     try:
         markets = await exchange.load_markets()
-        symbols = [
-            s for s, m in markets.items()
-            if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap'
-        ]
-        return symbols[:400]
+        return [s for s, m in markets.items() 
+                if m.get('active') and m.get('quote') == 'USDT' and m.get('type') == 'swap'][:400]
     except Exception as e:
-        logger.error(f"Ошибка загрузки рынков: {e}")
+        logger.error(f"Ошибка рынков: {e}")
         return []
 
 
@@ -91,8 +87,7 @@ async def fetch_ohlcv(symbol, timeframe, limit=100):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
-        except Exception as e:
-            logger.warning(f"OHLCV error {symbol} {timeframe}: {e}")
+        except:
             return None
 
 
@@ -102,7 +97,7 @@ async def check_symbol(symbol):
             df5 = await fetch_ohlcv(symbol, '5m', 80)
             df15 = await fetch_ohlcv(symbol, '15m', 60)
 
-            if df5 is None or df15 is None or len(df5) < 40 or len(df15) < 30:
+            if not all([df5, df15]) or len(df5) < 40 or len(df15) < 30:
                 return None
 
             price = df5['close'].iloc[-1]
@@ -118,83 +113,76 @@ async def check_symbol(symbol):
             ticker = await exchange.fetch_ticker(symbol)
             funding = await exchange.fetch_funding_rate(symbol)
 
-            volume_24h = ticker.get('quoteVolume', 0)
-            funding_rate = funding.get('fundingRate', 0)
-
-            if (change_5m >= PRICE_PUMP_5M and
-                change_15m >= PRICE_PUMP_15M and
-                vol_ratio >= VOLUME_SPIKE and
-                rsi5 >= RSI_THRESHOLD and
-                rsi15 >= RSI_THRESHOLD_15M and
-                volume_24h >= MIN_24H_VOLUME_USD and
-                funding_rate >= MIN_FUNDING_RATE):
+            if (change_5m >= PRICE_PUMP_5M and change_15m >= PRICE_PUMP_15M and
+                vol_ratio >= VOLUME_SPIKE and rsi5 >= RSI_THRESHOLD and
+                rsi15 >= RSI_THRESHOLD_15M and ticker.get('quoteVolume', 0) >= MIN_24H_VOLUME_USD and
+                funding.get('fundingRate', 0) >= MIN_FUNDING_RATE):
 
                 return {
-                    'symbol': symbol.replace('/USDT', '').replace('USDT', ''),
+                    'symbol': symbol.replace('/USDT', ''),
                     'price': price,
                     'pump_5m': round(change_5m, 2),
                     'pump_15m': round(change_15m, 2),
                     'vol_ratio': round(vol_ratio, 2),
                     'rsi5': round(rsi5, 1),
-                    'funding': round(funding_rate * 10000, 2),
-                    'volume_24h': f"{volume_24h / 1_000_000:.1f}M",
+                    'funding': round(funding.get('fundingRate', 0) * 10000, 2),
+                    'volume_24h': f"{ticker.get('quoteVolume', 0)/1_000_000:.1f}M",
                     'time': datetime.now().strftime("%H:%M")
                 }
-        except Exception as e:
-            logger.debug(f"check_symbol error {symbol}: {e}")
+        except:
+            pass
         return None
 
 
 async def scanner():
     global TELEGRAM_CHAT_ID
-    logger.info("🚀 Bybit Short Pump Scanner запущен...")
+    logger.info("🚀 Scanner запущен...")
 
     while True:
         if TELEGRAM_CHAT_ID is None:
-            logger.info("Ожидание команды /start...")
             await asyncio.sleep(5)
             continue
 
         try:
             symbols = await get_symbols()
-            logger.info(f"Сканирую {len(symbols)} пар...")
-
-            tasks = [check_symbol(sym) for sym in symbols]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
+            results = await asyncio.gather(*[check_symbol(s) for s in symbols], return_exceptions=True)
             signals = [r for r in results if isinstance(r, dict)]
 
             for signal in signals:
                 text = f"""<b>🔴 ШОРТ СИГНАЛ — СИЛЬНЫЙ ПАМП</b>
 🔹 <b>{signal['symbol']}USDT</b>
 💰 Цена: <b>${signal['price']:.4f}</b>
-📈 Рост 5м: <b>+{signal['pump_5m']}%</b>
-📈 Рост 15м: <b>+{signal['pump_15m']}%</b>
-📊 Volume spike: <b>x{signal['vol_ratio']}</b>
-📉 RSI 5m: <b>{signal['rsi5']}</b>
-💸 Funding: <b>+{signal['funding']}</b> ‱
-📊 24h Vol: <b>${signal['volume_24h']}</b>
-🕒 {signal['time']} | Bybit"""
+📈 5м: <b>+{signal['pump_5m']}%</b> | 15м: <b>+{signal['pump_15m']}%</b>
+📊 Volume: <b>x{signal['vol_ratio']}</b> | RSI5: <b>{signal['rsi5']}</b>
+💸 Funding: <b>+{signal['funding']}</b> ‱ | Vol24: <b>${signal['volume_24h']}</b>
+🕒 {signal['time']}"""
 
-                try:
-                    await bot.send_message(TELEGRAM_CHAT_ID, text)
-                    logger.info(f"✅ Сигнал отправлен: {signal['symbol']}")
-                except Exception as e:
-                    logger.error(f"Ошибка отправки в Telegram {signal['symbol']}: {e}")
+                await bot.send_message(TELEGRAM_CHAT_ID, text)
+                logger.info(f"✅ Сигнал: {signal['symbol']}")
 
-            logger.info(f"Найдено сигналов: {len(signals)}")
-
+            logger.info(f"Сигналов найдено: {len(signals)}")
         except Exception as e:
-            logger.error(f"Ошибка в цикле сканирования: {e}")
+            logger.error(f"Ошибка scanner: {e}")
 
         await asyncio.sleep(SCAN_INTERVAL)
 
 
+async def main():
+    """Запускаем и поллинг, и сканер одновременно"""
+    logger.info("Запуск бота...")
+    
+    # Запускаем scanner в фоне
+    asyncio.create_task(scanner())
+
+    # Запускаем получение сообщений от Telegram
+    await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(scanner())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 Бот остановлен пользователем")
+        logger.info("🛑 Бот остановлен")
     except Exception as e:
         logger.critical(f"Критическая ошибка: {e}")
     finally:
