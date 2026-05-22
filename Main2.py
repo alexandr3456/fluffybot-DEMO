@@ -150,13 +150,12 @@ async def check_symbol(symbol):
     return None
 
 async def scanner():
-     print("🚀 Bybit Short Pump Scanner запущен...")
+    print("🚀 Bybit Short Pump Scanner запущен...")
     while True:
         try:
             symbols = await get_symbols()
             logger.info(f"Найдено {len(symbols)} символов для сканирования")
 
-            # Обрабатываем символы батчами по 20 штук для снижения нагрузки на API
             batch_size = 20
             all_signals = []
 
@@ -167,17 +166,13 @@ async def scanner():
                 tasks = [check_symbol(sym) for sym in batch]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Фильтруем только успешные результаты (не исключения)
                 valid_results = [
                     result for result in results
-            if isinstance(result, dict) and result is not None
+                    if isinstance(result, dict) and result is not None
                 ]
                 all_signals.extend(valid_results)
-
-                # Пауза между батчами для соблюдения лимитов API
                 await asyncio.sleep(2)
 
-            # Отправляем найденные сигналы в Telegram
             sent_count = 0
             for signal in all_signals:
                 text = f"""<b>🔴 ШОРТ СИГНАЛ — СИЛЬНЫЙ ПАМП</b>
