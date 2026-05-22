@@ -107,7 +107,7 @@ async def check_symbol(symbol):
         # Добавляем задержку между запросами
         await asyncio.sleep(0.1)
 
-        # Убрали await — fetch_ohlcv синхронная функция
+        # Синхронные вызовы fetch_ohlcv
         df5 = fetch_ohlcv(symbol, '5m', 80)
         df15 = fetch_ohlcv(symbol, '15m', 60)
 
@@ -126,16 +126,17 @@ async def check_symbol(symbol):
         current_vol = df5['volume'].iloc[-1]
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        # RSI — синхронные вызовы, без await
+        # RSI — синхронные вызовы
         rsi5_series = rsi(df5['close'], period=14)
         rsi15_series = rsi(df15['close'], period=14)
         rsi5 = rsi5_series.iloc[-1] if not rsi5_series.empty else 0
         rsi15 = rsi15_series.iloc[-1] if not rsi15_series.empty else 0
 
-        # 24h volume — асинхронный вызов
-        ticker = await exchange.fetch_ticker(symbol)
+        # 24h volume — синхронный вызов (убрали await)
+        ticker = exchange.fetch_ticker(symbol)  # Без await!
         volume_24h = ticker.get('quoteVolume', 0)
 
+        # Асинхронный вызов для funding rate
         funding = await get_funding_rate(symbol)
 
         if (change_5m >= PRICE_PUMP_5M and
@@ -160,7 +161,7 @@ async def check_symbol(symbol):
     except Exception as e:
         logger.error(f"check_symbol error for {symbol}: {e}")
     return None
-
+    
 async def scanner():
     print("🚀 Bybit Short Pump Scanner запущен...")
     while True:
