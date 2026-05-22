@@ -50,7 +50,20 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode="HTML")
 )
 dp = Dispatcher()  # Инициализация Dispatcher
+@dp.message()
+async def handle_start(message):
+    """Обрабатываем команду /start и запоминаем ID чата"""
+    if message.text == '/start':
+        # Сохраняем ID чата пользователя
+        global TELEGRAM_CHAT_ID
+        TELEGRAM_CHAT_ID = message.chat.id
+        await message.answer(
+            "✅ Бот запущен! Теперь вы будете получать сигналы о сильных пампах.\n\n"
+            "Сканер запустится автоматически."
+        )
+        logger.info(f"Запомнен ID чата: {TELEGRAM_CHAT_ID}")
 
+TELEGRAM_CHAT_ID = None
 def rsi(series, period=14):
     """Простой расчёт RSI"""
     delta = series.diff()
@@ -152,6 +165,12 @@ async def scanner():
     print("🚀 Bybit Short Pump Scanner запущен...")
     while True:
         try:
+            # Ждём, пока не будет установлен ID чата
+            if TELEGRAM_CHAT_ID is None:
+                logger.info("Ожидание команды /start...")
+                await asyncio.sleep(5)
+                continue
+
             symbols = await get_symbols()
             logger.info(f"Найдено {len(symbols)} символов для сканирования")
 
@@ -167,7 +186,7 @@ async def scanner():
 
                 valid_results = [
                     result for result in results
-                    if isinstance(result, dict) and result is not None
+            if isinstance(result, dict) and result is not None
                 ]
                 all_signals.extend(valid_results)
                 await asyncio.sleep(2)
@@ -189,9 +208,9 @@ async def scanner():
 🕒 {signal['time']} | Bybit Perpetual"""
 
                 try:
-                   
+                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
                     sent_count += 1
-                    logger.info(f"✅ Сигнал отправлен для {signal['symbol']}")
+            logger.info(f"✅ Сигнал отправлен для {signal['symbol']}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка отправки в Telegram для {signal['symbol']}: {e}")
 
