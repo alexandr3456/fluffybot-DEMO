@@ -19,14 +19,13 @@ load_dotenv()
 
 # ========================= НАСТРОЙКИ =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 300))
 
 # Проверка обязательных переменных
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN missing")
-if not TELEGRAM_CHAT_ID:
-    raise ValueError("❌ TELEGRAM_CHAT_ID missing")
+
 
 # Параметры качества сигналов
 MIN_24H_VOLUME_USD = 800_000
@@ -190,7 +189,7 @@ async def scanner():
 🕒 {signal['time']} | Bybit Perpetual"""
 
                 try:
-                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+                   
                     sent_count += 1
                     logger.info(f"✅ Сигнал отправлен для {signal['symbol']}")
                 except Exception as e:
