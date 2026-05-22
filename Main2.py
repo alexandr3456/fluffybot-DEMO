@@ -48,8 +48,37 @@ exchange = ccxt.bybit({
 })
 
 TELEGRAM_CHAT_ID = None
+SUBSCRIPTION_ACTIVE = False  # Флаг активности подписки
 
+@dp.message()
+async def handle_messages(message):
+    global TELEGRAM_CHAT_ID, SUBSCRIPTION_ACTIVE
 
+    if message.text.lower() == '/start':
+        TELEGRAM_CHAT_ID = message.chat.id
+        SUBSCRIPTION_ACTIVE = True
+        await message.answer(
+            "✅ <b>Bybit Short Pump Scanner успешно запущен!</b>\n\n"
+            "Теперь вы будете получать сигналы."
+        )
+        logger.info(f"✅ Чат ID сохранён: {TELEGRAM_CHAT_ID}. Подписка активна")
+
+    elif message.text.lower() == '/stop':
+        SUBSCRIPTION_ACTIVE = False
+        TELEGRAM_CHAT_ID = None
+        await message.answer(
+            "🛑 <b>Подписка отключена</b>\n\n"
+            "Вы больше не будете получать сигналы. Для возобновления отправьте /start"
+        )
+        logger.info("🛑 Подписка отключена по команде /stop")
+
+    else:
+        await message.answer(
+            "ℹ️ <b>Неизвестная команда</b>\n\n"
+            "Доступные команды:\n"
+            "/start — запустить подписку на сигналы\n"
+            "/stop — отключить подписку"
+        )
 @dp.message()
 async def handle_start(message):
     global TELEGRAM_CHAT_ID
