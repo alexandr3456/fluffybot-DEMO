@@ -1,5 +1,5 @@
 pandas
-
+pandas_ta_classic
 apscheduler
 aiogram
 pyTelegramBotAPI
